@@ -19,6 +19,49 @@ router.get('/org/things', auth.requireAuth, auth.requireOrgMembership, h); // or
 
 ---
 
+## Before you adopt — answer these four, in the pull request
+
+**Not a formality.** Each one has a wrong answer that produces a service which *looks* protected and is not. Answer them in the adopting PR so a reviewer can see the answers rather than reconstruct them.
+
+### 1. Which organisation header does this service scope on?
+
+**`x-org-id` is the only one this package validates.** The live client sends three — `x-org-id`, `x-org-identifier` and `x-org-short-name` — and **all three are passed through untouched**, because organisation context is validated and never substituted.
+
+> ⛔ **A service that scopes on `x-org-identifier` or `x-org-short-name` is adopting a check that does not protect it.** The membership verdict would be computed for the organisation named in `x-org-id` while the service reads a different header, and a caller can send their own `x-org-id` beside another organisation's short name. **If your service reads either, say so before adopting and do not assume this check covers you.**
+
+*This is first on the list because it is the one failure a green adoption would hide.*
+
+### 2. Does this service have a local user row to resolve?
+
+**No local user table** → omit `resolveLocalIdentity` entirely. Omitting it is a *distinct state*, not a weaker one.
+
+**It does** → supply the resolver, and expect **refusals where the donor proceeded**. A principal that verifies but resolves to no local row is refused here; `service_nearyest` currently continues with an id of `0` and lets a downstream check catch it. Requests that used to succeed will start returning 401.
+
+### 3. Is any route in this service organisation-scoped?
+
+**If none is,** `requireOrgMembership` is not mounted anywhere and the predicate is never reached. **Say that explicitly in the adopting PR and in a comment beside the predicate.** A reader who finds an `isMemberOf` that always returns `false` should not have to infer why — and it should be `false` rather than `true`, so that a route which later mounts the check fails loudly instead of silently passing.
+
+**If any route is,** mount `requireOrgMembership` after `requireAuth` on that route, and supply a predicate that answers *is this principal a member of this organisation* — never *may they do this*.
+
+### 4. What does this service do today on the four failure states, and which of them change?
+
+| State | This package | What to check in your service |
+|---|---|---|
+| credential refused | `401` | were you already returning 401, or 500? |
+| **auth service unreachable / 5xx / timeout** | **`503`** | anything treating this as "bad token" will stop doing so — including clients that retry a token refresh |
+| principal verified, **no local row** | **`401`, never a placeholder identity** | **the behaviour change most likely to surprise you** |
+| organisation not named on an org-scoped route | `403` | omitting the header is not a bypass |
+
+**Adoption changes behaviour. That is the point of it, and it is not a regression — but the people running the service need to have been told which requests start failing and why.**
+
+### A worked example
+
+`service_orbit_kafka`, the first adopter: **(1)** scopes on nothing — `getConnection` accepts an organisation id and ignores it; **(2)** no local user table, resolver omitted; **(3)** no organisation-scoped route, so `requireOrgMembership` is unmounted and `isMemberOf` is `() => false`; **(4)** it had **no verification at all**, so both routes go from open to gated.
+
+> ⚠️ Note what that example does **not** demonstrate. Kafka exercises **neither** the organisation seam nor the local-identity seam. It proves distribution and `requireAuth`. **It does not prove the package**, and a green first adoption should not be read as broader assurance than that.
+
+---
+
 ## What it does, and the one thing it must never do
 
 | | |
