@@ -9,7 +9,7 @@ import { createAuthClient } from '@purpusgit/service-auth-client';
 
 const auth = createAuthClient({
   authServiceBaseUrl: process.env.AUTH_SERVICE_BASE_URL!,   // required; no default, ever
-  isMemberOf: (principal, orgId) => membership.check(principal.userId, orgId),
+  isMemberOf: () => false,   // see "Membership is not implemented" — every service passes this today
   resolveLocalIdentity: (p) => users.findByIdentifier(p.userId), // optional
 });
 
@@ -41,7 +41,7 @@ router.get('/org/things', auth.requireAuth, auth.requireOrgMembership, h); // or
 
 **If none is,** `requireOrgMembership` is not mounted anywhere and the predicate is never reached. **Say that explicitly in the adopting PR and in a comment beside the predicate.** A reader who finds an `isMemberOf` that always returns `false` should not have to infer why — and it should be `false` rather than `true`, so that a route which later mounts the check fails loudly instead of silently passing.
 
-**If any route is,** mount `requireOrgMembership` after `requireAuth` on that route, and supply a predicate that answers *is this principal a member of this organisation* — never *may they do this*.
+**If any route is,** mount `requireOrgMembership` after `requireAuth` on that route and supply a predicate that answers *is this principal a member of this organisation* — never *may they do this*. **Today no service can supply a real one** — see below — so if you believe a route of yours needs it, that is a finding to report rather than a predicate to write.
 
 ### 4. What does this service do today on the four failure states, and which of them change?
 
@@ -79,7 +79,7 @@ The single exception is the membership predicate, and it is deliberately the nar
 
 **Principal — substituted.** The verified subject is attached as `req.principal`, and **every `x-user-*` header the caller sent is deleted and the canonical ones re-set** from the verified value. Validating a client-supplied identity still trusts the caller to send something, and any path that skips the comparison restores the impersonation.
 
-**Organisation — validated, never substituted.** The caller keeps sending organisation context exactly as it does today; the package reads it, checks membership, and **passes every organisation header through byte-identical**. It never sets, clears or derives organisation context.
+**Organisation — validated, never substituted.** The caller keeps sending organisation context exactly as it does today; the package reads it, applies the membership predicate the service injected, and **passes every organisation header through byte-identical**. It never sets, clears or derives organisation context.
 
 **Why it cannot be otherwise:** the access token carries `{ userId }` and nothing else — verified by reading the signing call in `service_auth` (`jwt.util.ts`, `const payload: TokenPayload = { userId }`), not a document about it. **There is no organisation in the token to re-establish anything from.** A package that "sets" organisation context would set it to empty on every request and fail every organisation-scoped screen in the live Flutter app.
 
@@ -90,6 +90,22 @@ The live client sends **three**, on both mobile and web: `x-org-id`, `x-org-iden
 **Only `x-org-id` is validated**, because that is the one services actually scope on (`service_orbit_orgs` parses it as a positive integer and puts it in the SQL predicate; nothing reads `x-org-identifier`). **All three are passed through untouched.**
 
 > ⚠️ **Known limitation.** A service that scopes on `x-org-short-name` or `x-org-identifier` **instead of** `x-org-id` is not protected by this package: a caller could send their own `x-org-id` alongside another organisation's short name. Validating those too needs a resolver that maps them to an organisation, which is authorisation-shaped and is not in this package. **If your service scopes on anything other than `x-org-id`, say so before adopting.**
+
+---
+
+## Membership is not implemented, anywhere, and that is a ruling rather than a gap awaiting work
+
+**Every service that adopts this package passes `isMemberOf: () => false`.** kafka does. `service_marketplace_ecom` does. If you are adopting, you will too, and **that is the correct end state, not a stopgap you are expected to come back and finish.**
+
+**Why, per the ruling on purpusgit/lanes#16:** the membership table carries **no link to a person** — no column and no foreign key. The only available path is a soft match on contact fields with no referential integrity, and the same-named UUID column that appears on both tables and looks like the obvious join **matches zero rows out of 32,959**. *(Those figures are from the ruling's database read, not from a measurement of my own.)* **Nobody builds the soft match.**
+
+**So what does the seam buy, if nothing implements it?** Three things, and they are the reason it stays mandatory at construction rather than becoming optional:
+
+1. **It refuses to let a service pretend.** There is no default and it never falls back to `true`, so a service cannot acquire an *apparent* membership check by omission.
+2. **`() => false` fails closed and loudly.** If a route ever mounts `requireOrgMembership`, it answers 403 immediately rather than silently passing — the failure is visible in a minute, not discovered in an audit.
+3. **When the schema gap closes, membership is one function against one join, in one place, for the whole estate** — which is the entire reason it was built as a seam instead of thirteen implementations.
+
+> ⛔ **Do not read `isMemberOf` in a service's source and conclude that organisation membership is enforced there.** It is not enforced anywhere. **Organisation scoping in this estate works exactly as it did before this package existed**, and adopting the package does not change it.
 
 ---
 
