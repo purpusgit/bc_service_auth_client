@@ -139,6 +139,33 @@ The only place a signed-out credential survives is **this package's positive cac
 
 ---
 
+## Resolving the caller: what the resolver is given, and what it is deliberately not
+
+`resolveLocalIdentity(principal, context)` receives the verified principal and **one** other thing:
+
+```ts
+resolveLocalIdentity: async (principal, { bearerToken }) => {
+  // a local table lookup needs neither of these beyond principal.userId;
+  // an upstream call made AS THE CALLER needs the token, and nothing else.
+  const r = await fetch(`${AUTH}/user/get/${principal.userId}`, {
+    headers: { Authorization: `Bearer ${bearerToken}` },
+  });
+  return r.ok ? (await r.json()).data : null;   // null => the request is REFUSED
+}
+```
+
+**Why this shape.** Two real services have now adopted this package and neither resolved the way the original seam assumed. The donor looked a caller up in its own database; `service_marketplace_ecom` has **no user table at all** and resolves by calling the auth service **as the caller**, which a `(principal) => …` signature cannot express. Resolution therefore had to move outside the package in that service — which meant **rebuilding the package's own caching there**, because a result resolved outside is a result cached outside, and an uncached per-request call to the auth service is the load hazard the negative cache exists to prevent.
+
+**What was rejected, and why.** The obvious fix is to pass the resolver the **request**. It was rejected: the request carries the `x-user-*` headers this package has just overwritten, the organisation headers it validates but does not own, and a body and query a resolver has no business reading. Handing it back re-exposes exactly what the package spent effort normalising, and invites a resolver to make authorisation decisions — which it must never do.
+
+**So the boundary is: everything upstream resolution needs, and nothing it does not.** That is one field. When something else turns out to be genuinely required, adding it here is a deliberate act with a reason attached — which passing the whole request would have skipped. **A conformance test asserts the context has exactly one key**, so widening it is a decision someone has to make on purpose rather than a drift.
+
+> ⚠️ **`bearerToken` is a live credential.** It is the caller's, it is valid, and the package is handing it to service-supplied code. Use it to authenticate the one upstream call that resolves this principal. **Do not log it, do not store it, and do not use it to act on the caller's behalf beyond resolution.** The package already holds this token — it introspects with it — so nothing new is exposed *to the package*; what is new is that adopter code now receives it.
+
+**Adding the second argument is not a breaking change.** A resolver written as `(principal) => …` keeps working unchanged, and a conformance test holds that.
+
+---
+
 ## Never a default identity
 
 If a principal verifies but **cannot be resolved to a local row**, the request is **refused**. Not passed on as a placeholder, not deferred to a downstream check, not cached as a positive.

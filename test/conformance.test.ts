@@ -337,3 +337,72 @@ describe('invalidate and clear exist so the suite can drive the cache', () => {
     expect(upstreamCalls).toBe(2); // re-introspected
   });
 });
+
+describe('the resolver context — upstream resolution, and only what it needs', () => {
+  it('receives the CALLER\'S OWN bearer token, not some other one', async () => {
+    const seen: Array<{ userId: string; token: string }> = [];
+    const { app } = buildApp({
+      resolveLocalIdentity: async (p: Principal, ctx: { bearerToken: string }) => {
+        seen.push({ userId: p.userId, token: ctx.bearerToken });
+        return { id: 1 };
+      },
+    });
+    await request(app).get('/private').set(bearer('caller-alpha'));
+    await request(app).get('/private').set(bearer('caller-beta'));
+    expect(seen.map((s) => s.token)).toEqual(['caller-alpha', 'caller-beta']);
+  });
+
+  it('the context carries the token and NOTHING else — no request, no headers', async () => {
+    let keys: string[] = [];
+    const { app } = buildApp({
+      resolveLocalIdentity: async (_p: Principal, ctx: object) => {
+        keys = Object.keys(ctx);
+        return { id: 1 };
+      },
+    });
+    await request(app).get('/private').set(bearer()).set({ 'x-org-id': '99', 'x-user-id': 'forged' });
+    // If this ever grows, it should be a deliberate act with a reason, not a drift.
+    expect(keys).toEqual(['bearerToken']);
+  });
+
+  it('the resolver result is CACHED with the principal — repeated requests call it once', async () => {
+    let resolverCalls = 0;
+    const { app } = buildApp({
+      resolveLocalIdentity: async () => { resolverCalls += 1; return { id: 7 }; },
+    });
+    for (let i = 0; i < 5; i += 1) {
+      expect((await request(app).get('/private').set(bearer('warm-resolver'))).status).toBe(200);
+    }
+    // This is the whole reason resolution belongs inside the package: resolving outside it
+    // means rebuilding this caching in every adopting service.
+    expect(resolverCalls).toBe(1);
+    expect(upstreamCalls).toBe(1);
+  });
+
+  it('a burst on one credential calls the resolver exactly once', async () => {
+    let resolverCalls = 0;
+    mode = 'slow';
+    const { app } = buildApp({
+      timeoutMs: 2_000,
+      resolveLocalIdentity: async () => { resolverCalls += 1; return { id: 7 }; },
+    });
+    await Promise.all(Array.from({ length: 20 }, () => request(app).get('/private').set(bearer('burst2'))));
+    expect(resolverCalls).toBe(1);
+  });
+
+  it('an OLD one-argument resolver still works — adding the context is not a breaking change', async () => {
+    const { app } = buildApp({ resolveLocalIdentity: async (p: Principal) => ({ echoed: p.userId }) });
+    const res = await request(app).get('/private').set(bearer());
+    expect(res.status).toBe(200);
+    expect(res.body.principal.local).toEqual({ echoed: 'u-1' });
+  });
+
+  it('a resolver that uses the token to fail still refuses rather than passing', async () => {
+    const { app } = buildApp({
+      resolveLocalIdentity: async (_p: Principal, ctx: { bearerToken: string }) =>
+        (ctx.bearerToken === 'no-row' ? null : { id: 1 }),
+    });
+    expect((await request(app).get('/private').set(bearer('no-row'))).status).toBe(401);
+    expect((await request(app).get('/private').set(bearer('has-row'))).status).toBe(200);
+  });
+});

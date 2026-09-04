@@ -36,8 +36,34 @@ export type MembershipPredicate = (
   organisationId: string,
 ) => boolean | Promise<boolean>;
 
+/**
+ * What a resolver is given in addition to the principal.
+ *
+ * DELIBERATELY ONE FIELD. The obvious design is to hand the resolver the request, and it is
+ * the wrong one: the request carries the `x-user-*` headers this package has just
+ * overwritten, the organisation headers it validates but does not own, and a body and query
+ * a resolver has no business reading. Passing it back would re-expose precisely what the
+ * package spent effort normalising, and would invite a resolver to make authorisation
+ * decisions, which requirement 11 forbids.
+ *
+ * Upstream resolution needs exactly one thing the principal does not carry: the caller's
+ * bearer credential. So that is what it gets, and nothing else. When something else turns
+ * out to be genuinely required, adding a field here is a deliberate act with a reason
+ * attached — which handing over the whole request would have skipped.
+ *
+ * ⚠️ `bearerToken` IS A LIVE CREDENTIAL. It is the caller's, it is valid, and it is being
+ * handed to service-supplied code. Use it to authenticate the one upstream call that
+ * resolves this principal. Do not log it, do not store it, do not forward it anywhere the
+ * caller did not intend, and do not use it to act on the caller's behalf beyond resolution.
+ */
+export interface ResolverContext {
+  /** The verified bearer token the caller sent, without the "Bearer " prefix. */
+  bearerToken: string;
+}
+
 export type LocalIdentityResolver = (
   principal: Principal,
+  context: ResolverContext,
 ) => unknown | null | Promise<unknown | null>;
 
 export interface AuthClientOptions {
@@ -45,7 +71,15 @@ export interface AuthClientOptions {
   authServiceBaseUrl: string;
   /** Required. The package ships no implementation and refuses to construct without one. */
   isMemberOf: MembershipPredicate;
-  /** Optional. Supply it only if this service HAS a local user table. */
+  /**
+   * Optional. Supply it if this service resolves the caller to something of its own —
+   * a local user row, or an upstream call made AS the caller.
+   *
+   * Its result is cached alongside the principal for the positive lifetime, which is the
+   * reason to put resolution here rather than in a handler after `requireAuth`: resolving
+   * outside the package means rebuilding that caching, and an uncached per-request call to
+   * the auth service is the load hazard the negative cache exists to prevent.
+   */
   resolveLocalIdentity?: LocalIdentityResolver;
   /** Introspection timeout. Not a security parameter. */
   timeoutMs?: number;
@@ -156,7 +190,7 @@ export function createAuthClient(
       if (resolveLocalIdentity) {
         let local: unknown;
         try {
-          local = await resolveLocalIdentity(principal);
+          local = await resolveLocalIdentity(principal, { bearerToken: token });
         } catch {
           // The resolver's own dependency is down. That is not this credential being
           // bad, so it is indeterminate and is NOT negative-cached. The donor's
