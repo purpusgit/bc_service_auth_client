@@ -93,6 +93,35 @@ The live client sends **three**, on both mobile and web: `x-org-id`, `x-org-iden
 
 ---
 
+## Fastify
+
+```ts
+import { createAuthClient, createFastifyAuth } from '@purpusgit/service-auth-client';
+
+const client = createAuthClient({ authServiceBaseUrl, isMemberOf: () => false });
+const auth = createFastifyAuth(client);
+
+app.get('/things', { preHandler: [auth.requireAuth] }, handler);
+```
+
+**It is an adapter, not a second implementation.** The classification, both caches, the single-flight de-duplication and the resolver contract all live behind `client.verify()`, which the Express handler is also a thin adapter over. **This file contains no cache, no map, no timer and no HTTP call** — if it ever grows one it has stopped being an adapter.
+
+**Three things differ between the frameworks, not one:**
+
+| | Express | Fastify |
+|---|---|---|
+| mounting | positional: `router.get(path, mw, handler)` | route option: `{ preHandler: [mw] }` |
+| continuing | **call `next()`** | **return without replying** |
+| refusing | `res.status(n).json(b)` | `reply.status(n).send(b)` |
+
+Nothing about the request or reply *shapes* forces more: both expose `headers.authorization` as a string and both are decorated by assignment.
+
+> ⛔ **`@fastify/express` was considered and rejected.** It runs Express middleware unchanged and would have made this file unnecessary — but it hands middleware the **raw Node request**, so `req.principal = …` lands on an object a Fastify handler never reads. The gate would appear to run, report success, and decorate nothing. **That is the failure class this package exists to remove**, so it was not worth saving a file.
+
+**No dependency on fastify.** The adapter's types are structural; a service that never imports it never pays for it.
+
+---
+
 ## Membership is not implemented, anywhere, and that is a ruling rather than a gap awaiting work
 
 **Every service that adopts this package passes `isMemberOf: () => false`.** kafka does. `service_marketplace_ecom` does. If you are adopting, you will too, and **that is the correct end state, not a stopgap you are expected to come back and finish.**

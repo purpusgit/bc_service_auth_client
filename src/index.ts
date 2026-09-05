@@ -4,6 +4,8 @@ import { TtlCache } from './cache';
 
 export type { Introspection };
 export { TtlCache } from './cache';
+export { createFastifyAuth } from './fastify';
+export type { FastifyAuth, FastifyLikeRequest, FastifyLikeReply } from './fastify';
 export { introspect };
 
 /**
@@ -88,11 +90,25 @@ export interface AuthClientOptions {
 export interface AuthClient {
   requireAuth: RequestHandler;
   requireOrgMembership: RequestHandler;
+  /**
+   * The framework-agnostic core: verify a bearer token and resolve its principal.
+   *
+   * This exists so a second framework can be a WRAPPER rather than a second
+   * implementation. Everything that matters — the three-way classification, the 60s
+   * positive cache, the 5s negative cache, the single-flight de-duplication and the
+   * resolver contract — lives behind this one call. An adapter that re-implements any
+   * of those is not an adapter.
+   *
+   * `requireAuth` is itself a thin adapter over this.
+   */
+  verify(bearerToken: string): Promise<Resolution>;
+  /** The membership verdict, framework-agnostic. Throws only if the predicate throws. */
+  isMemberOfOrganisation(principal: Principal, organisationId: string): Promise<boolean>;
   invalidate(token: string): void;
   clear(): void;
 }
 
-type Resolution =
+export type Resolution =
   | { kind: 'verified'; principal: Principal }
   | { kind: 'refused' }
   | { kind: 'indeterminate'; reason: string };
@@ -294,6 +310,9 @@ export function createAuthClient(
   return {
     requireAuth,
     requireOrgMembership,
+    verify: resolve,
+    isMemberOfOrganisation: async (principal: Principal, organisationId: string) =>
+      Boolean(await isMemberOf(principal, organisationId)),
     invalidate(token: string) {
       positive.delete(token);
       negative.delete(token);
