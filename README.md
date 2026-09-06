@@ -120,16 +120,26 @@ Nothing about the request or reply *shapes* forces more: both expose `headers.au
 
 **No dependency on fastify.** The adapter's types are structural; a service that never imports it never pays for it.
 
-**And express is an *optional* peer, for the same reason in the other direction.** The package
-imports express for **types only** and calls nothing from it, but the peer dependency was declared
-unconditionally — so a Fastify service adopting the adapter installed express and its 72
-transitive packages to satisfy a requirement no code has. `service_ai_v_call` carries that
-tree today (`node_modules/express` marked `peer: true` in a service with no express in its
-dependencies; 72 is the pnpm figure measured on `service_goalcaller_contact_graph`, npm having
-deduped some of the shared ones). `peerDependenciesMeta.express.optional` removes it. All five
-Express adopters — `service_marketplace_ecom`, `service_orbit_analytics`, `service_nearyest`,
-`service_orbit_kafka`, `service_goalcaller_voicereach` — declare express in their own
-dependencies, so nothing changes for them.
+**And there is no dependency on express either — not even a peer.** This package once
+declared `express` as an unconditional peer while importing it for **types only**, so a
+Fastify service adopting the adapter installed express and its transitive tree to satisfy
+a requirement no code has. Making the peer optional fixed the install; it did not fix the
+cause, because `dist/index.d.ts` still opened with `import type { RequestHandler } from
+'express'`. Every consumer's `tsc` had to resolve express types to read `createAuthClient`,
+and the Fastify adopters compiled only because their tsconfig sets `skipLibCheck: true`.
+
+The core's types are now structural too — `ExpressLikeRequest`, `ExpressLikeResponse`,
+`ExpressLikeHandler`, describing exactly the three things it touches: `req.headers`,
+`res.status(...).json(...)`, and calling `next`. Express satisfies them without being
+named, so the peer dependency is gone rather than optional.
+
+> ⚠️ **The request type deliberately has no index signature.** `[key: string]: unknown`
+> is the obvious way to allow `req.principal`, and it breaks every caller: TypeScript
+> grants implicit index signatures to type aliases but **not to interfaces**, and express's
+> `Request` is an interface. Adding one takes `app.get(path, client.requireAuth, handler)`
+> from compiling to `TS2769`. That is not a prediction — it is what happens, and
+> `tsconfig.test.json` now typechecks the suite that mounts the middleware on a real
+> express app, so CI would catch it.
 
 ---
 

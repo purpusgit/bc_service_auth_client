@@ -11,7 +11,14 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '20' }
       - run: npm ci
-      - name: tsc --noEmit
+      - name: tsc --noEmit (src)
         run: npx tsc --noEmit
+      - name: tsc --noEmit (src + test)
+        # The tests mount `client.requireAuth` on a REAL express app. Until this step
+        # existed, tsconfig's `include: ["src"]` meant nothing typechecked that the
+        # package's Express-shaped types are assignable to express's own RequestHandler --
+        # vitest transpiles without typechecking, so the suite could pass on types that
+        # would fail in every adopter.
+        run: npx tsc --noEmit -p tsconfig.test.json
       - name: conformance suite
         run: npx vitest run
