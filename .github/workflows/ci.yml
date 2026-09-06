@@ -20,5 +20,16 @@ jobs:
         # vitest transpiles without typechecking, so the suite could pass on types that
         # would fail in every adopter.
         run: npx tsc --noEmit -p tsconfig.test.json
+      - name: no framework import in the core
+        # The whole point of the structural types is that dist/index.d.ts names no
+        # framework. Nothing else here defends that: re-adding `import type { Request }
+        # from 'express'` leaves BOTH typechecks at rc=0 and all 49 tests passing, and
+        # if the import is unused TypeScript even elides it from the emitted .d.ts -- so
+        # the coupling returns silently on whichever later edit first uses the type.
+        run: |
+          if grep -rn "from 'express'" src/ | grep -v '^\s*\*' | grep -v '\*'; then
+            echo "::error::src/ imports from 'express'. The core's types are structural on purpose -- see the comment at the top of src/index.ts."
+            exit 1
+          fi
       - name: conformance suite
         run: npx vitest run

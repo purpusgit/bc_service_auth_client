@@ -14,8 +14,9 @@
  * grants implicit index signatures to type aliases but NOT to interfaces, and express's
  * `Request` is an interface -- so it would stop being assignable to this type and every
  * adopter that passes a real request would fail to compile. The internal writes cast
- * instead, which is where the unsoundness belongs: inside the package, on one line,
- * rather than in a public type every consumer has to satisfy.
+ * instead -- the write in `requireAuth` and the read in `requireOrgMembership` -- which is
+ * where the unsoundness belongs: inside the package, on two lines it owns, rather than in
+ * a public type every consumer has to satisfy.
  */
 
 /** The only part of a request this file reads or writes. */
