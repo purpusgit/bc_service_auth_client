@@ -1,4 +1,45 @@
-import type { NextFunction, Request, RequestHandler, Response } from 'express';
+/*
+ * ⛔ NO IMPORT FROM 'express'. This file used to open with
+ * `import type { NextFunction, Request, RequestHandler, Response } from 'express'`.
+ * The import was type-only and erased at build, but it survived into `dist/index.d.ts`,
+ * so every consumer's `tsc` had to resolve express types to read this package's own
+ * `createAuthClient` -- and the two Fastify adopters only compiled because their tsconfig
+ * sets `skipLibCheck: true`. A dependency that is real but invisible unless one compiler
+ * flag is off is not a dependency anyone chose. The types below describe exactly the
+ * three properties this file touches (`req.headers`, `res.status(...).json(...)`, and
+ * calling `next`), so express satisfies them structurally without being named.
+ *
+ * ⚠️ DELIBERATELY NO INDEX SIGNATURE on the request. `[key: string]: unknown` would be
+ * the obvious way to allow `req.principal`, and it would break every caller: TypeScript
+ * grants implicit index signatures to type aliases but NOT to interfaces, and express's
+ * `Request` is an interface -- so it would stop being assignable to this type and every
+ * adopter that passes a real request would fail to compile. The internal writes cast
+ * instead -- the write in `requireAuth` and the read in `requireOrgMembership` -- which is
+ * where the unsoundness belongs: inside the package, on two lines it owns, rather than in
+ * a public type every consumer has to satisfy.
+ */
+
+/** The only part of a request this file reads or writes. */
+export interface ExpressLikeRequest {
+  headers: Record<string, string | string[] | undefined>;
+}
+
+/** The only part of a response this file uses, and only to refuse. */
+export interface ExpressLikeResponse {
+  status(code: number): { json(payload: unknown): unknown };
+}
+
+/**
+ * An Express-shaped middleware. Structurally compatible with express's `RequestHandler`
+ * in both directions the adopters need: mounting it (`app.get(path, client.requireAuth,
+ * handler)`) and calling it (`await client.requireAuth(req, res, () => {})`).
+ */
+export type ExpressLikeHandler = (
+  request: ExpressLikeRequest,
+  response: ExpressLikeResponse,
+  next: () => void,
+) => void | Promise<void>;
+
 import { introspect, type Introspection } from './introspect';
 import { TtlCache } from './cache';
 
@@ -88,8 +129,8 @@ export interface AuthClientOptions {
 }
 
 export interface AuthClient {
-  requireAuth: RequestHandler;
-  requireOrgMembership: RequestHandler;
+  requireAuth: ExpressLikeHandler;
+  requireOrgMembership: ExpressLikeHandler;
   /**
    * The framework-agnostic core: verify a bearer token and resolve its principal.
    *
@@ -124,7 +165,7 @@ export type Resolution =
  * service_orbit_orgs has already removed -- deleting the whole prefix means a header
  * nobody has thought of yet cannot be smuggled past this either.
  */
-function substituteUserHeaders(req: Request, principal: Principal): void {
+function substituteUserHeaders(req: ExpressLikeRequest, principal: Principal): void {
   for (const name of Object.keys(req.headers)) {
     if (name.toLowerCase().startsWith('x-user-')) delete req.headers[name];
   }
@@ -233,7 +274,11 @@ export function createAuthClient(
     return pending;
   }
 
-  const requireAuth: RequestHandler = async (req: Request, res: Response, next: NextFunction) => {
+  const requireAuth: ExpressLikeHandler = async (
+    req: ExpressLikeRequest,
+    res: ExpressLikeResponse,
+    next: () => void,
+  ) => {
     const header = req.headers.authorization;
     if (typeof header !== 'string' || !header.startsWith('Bearer ') || header.length <= 7) {
       res.status(401).json({ error: 'missing_bearer_token' });
@@ -254,7 +299,7 @@ export function createAuthClient(
       return;
     }
 
-    (req as Request & { principal?: Principal }).principal = result.principal;
+    (req as ExpressLikeRequest & { principal?: Principal }).principal = result.principal;
     substituteUserHeaders(req, result.principal);
     next();
   };
@@ -270,12 +315,12 @@ export function createAuthClient(
    * Omitting the header is NOT a bypass: a route that asks for this check refuses when
    * no organisation is named.
    */
-  const requireOrgMembership: RequestHandler = async (
-    req: Request,
-    res: Response,
-    next: NextFunction,
+  const requireOrgMembership: ExpressLikeHandler = async (
+    req: ExpressLikeRequest,
+    res: ExpressLikeResponse,
+    next: () => void,
   ) => {
-    const principal = (req as Request & { principal?: Principal }).principal;
+    const principal = (req as ExpressLikeRequest & { principal?: Principal }).principal;
     if (!principal) {
       // Wiring error, not a caller error: requireOrgMembership without requireAuth.
       res.status(500).json({ error: 'auth_middleware_misordered' });
