@@ -120,6 +120,14 @@ Nothing about the request or reply *shapes* forces more: both expose `headers.au
 
 **No dependency on fastify.** The adapter's types are structural; a service that never imports it never pays for it.
 
+**And express is an *optional* peer, for the same reason in the other direction.** The package
+imports express for **types only** and calls nothing from it, but the peer dependency was declared
+unconditionally — so a Fastify service adopting the adapter installed express and its 72
+transitive packages to satisfy a requirement no code has. `service_ai_v_call` carries that
+tree today (`node_modules/express` marked `peer: true` in a service with no express in its
+dependencies). `peerDependenciesMeta.express.optional` removes it. The four Express adopters
+declare express directly, so nothing changes for them.
+
 ---
 
 ## Membership is not implemented, anywhere, and that is a ruling rather than a gap awaiting work
