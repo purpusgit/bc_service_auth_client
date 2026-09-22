@@ -53,6 +53,9 @@ export { introspect };
  * Positive cache lifetime. THIS IS A SECURITY PARAMETER, NOT A TUNING KNOB, and it is
  * deliberately not configurable: it is the revocation reach. See the README section
  * "Revocation, and the 60 seconds" for why this number is the whole story.
+ *
+ * It is a CEILING, not a fixed lifetime. An entry whose token expires sooner is written
+ * to expire sooner -- see `tokenExpiryMs` and its call site.
  */
 const POSITIVE_TTL_MS = 60_000;
 
@@ -66,6 +69,35 @@ const POSITIVE_TTL_MS = 60_000;
 const NEGATIVE_TTL_MS = 5_000;
 
 const MAX_ENTRIES = 5_000;
+
+/**
+ * The token's own `exp`, as epoch milliseconds, or undefined when it cannot be read.
+ *
+ * ⚠️ THIS DECODES; IT DOES NOT VERIFY, and the distinction is the whole safety argument.
+ * It is called on exactly one path: immediately after `introspect` has returned
+ * `verified` for this token. A forged token, or one with a bad signature or an expiry
+ * already past, never reaches here -- the auth service refused it and it was
+ * negative-cached. So by the time this reads `exp`, that claim is as trustworthy as the
+ * verdict that preceded it, and reading it needs no key. `G1` is untouched: this package
+ * still holds no signing key and still verifies nothing locally.
+ *
+ * An unreadable token is not an error. Anything that is not a JWT with a numeric `exp`
+ * returns undefined and the entry simply takes the full ceiling, which is exactly the
+ * behaviour this package had before.
+ */
+function tokenExpiryMs(token: string): number | undefined {
+  const payload = token.split('.')[1];
+  if (!payload) return undefined;
+
+  try {
+    const { exp } = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as {
+      exp?: unknown;
+    };
+    return typeof exp === 'number' && Number.isFinite(exp) ? exp * 1000 : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export interface Principal {
   /** The verified subject. The access token carries `{ userId }` and nothing else. */
@@ -266,7 +298,20 @@ export function createAuthClient(
         principal = { userId: outcome.userId, local };
       }
 
-      positive.set(token, principal);
+      // ⛔ THE ENTRY NEVER OUTLIVES THE TOKEN. The 60 seconds is a ceiling on how long a
+      // REVOKED credential keeps working; it was also, accidentally, a floor on how long
+      // an EXPIRED one did. `Principal` carries no expiry and the entry was stamped a flat
+      // 60s from the moment it was set, so a token cached one second before its own `exp`
+      // was served as verified for a further 59 seconds after expiring. Harmless while
+      // every token lives 15 days, and not harmless at all the moment a short-lived
+      // credential depends on it.
+      //
+      // The cache clamps to POSITIVE_TTL_MS, so this can only ever SHORTEN an entry -- the
+      // revocation reach is unchanged, and a token with no readable expiry behaves exactly
+      // as it did before.
+      const expiresAtMs = tokenExpiryMs(token);
+      positive.set(token, principal, expiresAtMs === undefined ? undefined : expiresAtMs - now());
+
       return { kind: 'verified', principal };
     })().finally(() => inFlight.delete(token));
 
