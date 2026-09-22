@@ -43,9 +43,25 @@ export class TtlCache<V> {
     return entry.value;
   }
 
-  set(key: string, value: V): void {
+  /**
+   * `ttlMs` shortens THIS entry. It is clamped to the constructor's lifetime, which is
+   * the revocation reach: a caller may bring an entry in early, never push one past it.
+   *
+   * ⚠️ The guard is `Number.isFinite`, not a bare `Math.min`, and that is not tidiness.
+   * `Math.min(NaN, 60_000)` is `NaN`, `now() >= NaN` is `false`, and the entry would then
+   * be immortal -- reachable only by LRU eviction, i.e. an unbounded revocation reach from
+   * one bad argument. This class is exported and `set` is public, so `NaN` is type-legal
+   * from outside even though the call site in `index.ts` cannot produce it. `undefined`
+   * and `Infinity` land on the same safe branch: the ceiling.
+   *
+   * A non-positive lifetime is not a special case -- the entry is written already expired,
+   * `get` finds it so and deletes it, and the credential is re-introspected.
+   */
+  set(key: string, value: V, ttlMs?: number): void {
     if (this.entries.has(key)) this.entries.delete(key);
-    this.entries.set(key, { value, expiresAt: this.now() + this.ttlMs });
+
+    const lifetime = Number.isFinite(ttlMs) ? Math.min(ttlMs as number, this.ttlMs) : this.ttlMs;
+    this.entries.set(key, { value, expiresAt: this.now() + lifetime });
 
     while (this.entries.size > this.max) {
       const oldest = this.entries.keys().next();
