@@ -54,8 +54,8 @@ export { introspect };
  * deliberately not configurable: it is the revocation reach. See the README section
  * "Revocation, and the 60 seconds" for why this number is the whole story.
  *
- * It is a CEILING, not a fixed lifetime. An entry whose token expires sooner is written
- * to expire sooner -- see `tokenExpiryMs` and its call site.
+ * It is a CEILING, not a fixed lifetime: an entry whose token expires sooner expires
+ * sooner. See the `positive.set` call in `resolve`.
  */
 const POSITIVE_TTL_MS = 60_000;
 
@@ -65,6 +65,8 @@ const POSITIVE_TTL_MS = 60_000;
  * flood into unthrottled load on /token/validate -- which costs the auth service a
  * database READ and a WRITE per call, and is the single point of failure for every
  * signed-in request in the estate. Also not configurable.
+ *
+ * It doubles as the FLOOR on a positive entry, for the same reason -- see `resolve`.
  */
 const NEGATIVE_TTL_MS = 5_000;
 
@@ -73,17 +75,14 @@ const MAX_ENTRIES = 5_000;
 /**
  * The token's own `exp`, as epoch milliseconds, or undefined when it cannot be read.
  *
- * ⚠️ THIS DECODES; IT DOES NOT VERIFY, and the distinction is the whole safety argument.
- * It is called on exactly one path: immediately after `introspect` has returned
- * `verified` for this token. A forged token, or one with a bad signature or an expiry
- * already past, never reaches here -- the auth service refused it and it was
- * negative-cached. So by the time this reads `exp`, that claim is as trustworthy as the
- * verdict that preceded it, and reading it needs no key. `G1` is untouched: this package
- * still holds no signing key and still verifies nothing locally.
+ * ⚠️ THIS DECODES; IT DOES NOT VERIFY. It is called on exactly one path: immediately
+ * after `introspect` returned `verified` for this token. A forged token, a bad signature
+ * or an expiry the auth service rejected never reaches here -- it was refused and
+ * negative-cached. So the claim is as trustworthy as the verdict that preceded it, and
+ * reading it needs no key: `G1` holds, this package still verifies nothing locally.
  *
- * An unreadable token is not an error. Anything that is not a JWT with a numeric `exp`
- * returns undefined and the entry simply takes the full ceiling, which is exactly the
- * behaviour this package had before.
+ * Anything that is not a JWT with a numeric `exp` returns undefined, and the entry takes
+ * the full ceiling exactly as it did before.
  */
 function tokenExpiryMs(token: string): number | undefined {
   const payload = token.split('.')[1];
@@ -298,19 +297,26 @@ export function createAuthClient(
         principal = { userId: outcome.userId, local };
       }
 
-      // ⛔ THE ENTRY NEVER OUTLIVES THE TOKEN. The 60 seconds is a ceiling on how long a
-      // REVOKED credential keeps working; it was also, accidentally, a floor on how long
-      // an EXPIRED one did. `Principal` carries no expiry and the entry was stamped a flat
-      // 60s from the moment it was set, so a token cached one second before its own `exp`
-      // was served as verified for a further 59 seconds after expiring. Harmless while
-      // every token lives 15 days, and not harmless at all the moment a short-lived
-      // credential depends on it.
+      // THE ENTRY NEVER OUTLIVES THE TOKEN. The 60s bounds how long a REVOKED credential
+      // keeps working; it was also, accidentally, a floor on how long an EXPIRED one did,
+      // because nothing here carried the token's own `exp`.
       //
-      // The cache clamps to POSITIVE_TTL_MS, so this can only ever SHORTEN an entry -- the
-      // revocation reach is unchanged, and a token with no readable expiry behaves exactly
-      // as it did before.
+      // The floor is for CLOCK SKEW. `/token/validate` does enforce expiry, so a genuinely
+      // expired token comes back refused and is negative-cached -- but if our clock runs
+      // ahead of the auth service's, a token it still accepts reads as expired here, the
+      // entry is written already-expired, and the negative cache is never written either
+      // because the verdict was `verified`. Every request would then re-introspect with
+      // nothing throttling it, against B1 and B2. 5s is already the accepted window for a
+      // refusal, so it cannot extend the revocation reach; the cache clamps to 60s anyway.
+      //
+      // ⚠️ This governs the CACHE. The request in hand is still served `verified` -- the
+      // auth service just said so, and so are any single-flight waiters on it.
       const expiresAtMs = tokenExpiryMs(token);
-      positive.set(token, principal, expiresAtMs === undefined ? undefined : expiresAtMs - now());
+      positive.set(
+        token,
+        principal,
+        expiresAtMs === undefined ? undefined : Math.max(NEGATIVE_TTL_MS, expiresAtMs - now()),
+      );
 
       return { kind: 'verified', principal };
     })().finally(() => inFlight.delete(token));
