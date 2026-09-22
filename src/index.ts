@@ -66,7 +66,12 @@ const POSITIVE_TTL_MS = 60_000;
  * database READ and a WRITE per call, and is the single point of failure for every
  * signed-in request in the estate. Also not configurable.
  *
- * It doubles as the FLOOR on a positive entry, for the same reason -- see `resolve`.
+ * ⚠️ It is reused in `resolve` as the throttle for a token whose remaining life reads as
+ * NON-POSITIVE -- a clock-skew case, never an ordinary one. Two security parameters now
+ * share one constant: raising this for the flood reason above would also widen that
+ * throttle. They have the same shape (how long we may answer without asking again) and
+ * the same safe direction (short), which is why one constant is right -- but a future
+ * change to it has to be made with both in mind.
  */
 const NEGATIVE_TTL_MS = 5_000;
 
@@ -301,21 +306,28 @@ export function createAuthClient(
       // keeps working; it was also, accidentally, a floor on how long an EXPIRED one did,
       // because nothing here carried the token's own `exp`.
       //
-      // The floor is for CLOCK SKEW. `/token/validate` does enforce expiry, so a genuinely
-      // expired token comes back refused and is negative-cached -- but if our clock runs
-      // ahead of the auth service's, a token it still accepts reads as expired here, the
-      // entry is written already-expired, and the negative cache is never written either
-      // because the verdict was `verified`. Every request would then re-introspect with
-      // nothing throttling it, against B1 and B2. 5s is already the accepted window for a
-      // refusal, so it cannot extend the revocation reach; the cache clamps to 60s anyway.
+      // The floor covers CLOCK SKEW, and ONLY the non-positive case. `/token/validate`
+      // enforces expiry twice over, so a genuinely expired token comes back refused and is
+      // negative-cached -- but if our clock runs ahead of the auth service's, a token it
+      // still accepts reads as already expired here, the entry is written already-expired,
+      // and the negative cache is never written either because the verdict was `verified`.
+      // Every request would then re-introspect with nothing throttling it, against B1/B2.
       //
-      // ⚠️ This governs the CACHE. The request in hand is still served `verified` -- the
-      // auth service just said so, and so are any single-flight waiters on it.
+      // ⚠️ Flooring EVERY token would reintroduce the defect at smaller scale: one with a
+      // second of genuine life left would be cached for five and served past its own `exp`
+      // for four. Every token passes through its last five seconds, so that is the happy
+      // path, not an edge. Skew is the only thing that makes `remaining` non-positive, so
+      // that is the only case the floor touches.
+      //
+      // This governs the CACHE. The request in hand is still served `verified` -- the auth
+      // service just said so -- as are any single-flight waiters on it.
       const expiresAtMs = tokenExpiryMs(token);
+      const remaining = expiresAtMs === undefined ? undefined : expiresAtMs - now();
+
       positive.set(
         token,
         principal,
-        expiresAtMs === undefined ? undefined : Math.max(NEGATIVE_TTL_MS, expiresAtMs - now()),
+        remaining === undefined ? undefined : remaining > 0 ? remaining : NEGATIVE_TTL_MS,
       );
 
       return { kind: 'verified', principal };
