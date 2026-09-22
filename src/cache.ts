@@ -43,9 +43,24 @@ export class TtlCache<V> {
     return entry.value;
   }
 
-  set(key: string, value: V): void {
+  /**
+   * `ttlMs` sets THIS entry's lifetime and is clamped to the constructor's.
+   *
+   * ⛔ THE CLAMP IS THE POINT, not defensiveness. The constructor's lifetime IS the
+   * revocation reach, so a caller may bring one entry in early -- a credential that
+   * expires sooner than the cache would -- but can never push one past it. Written as
+   * `Math.min` rather than a check-and-throw because the safe outcome is the useful
+   * one: a caller asking for longer gets the ceiling, silently and correctly.
+   *
+   * A non-positive lifetime is not a special case. The entry is written already expired,
+   * `get` finds it so and deletes it, and the credential is re-introspected -- which is
+   * the right answer for a token whose own expiry has already passed.
+   */
+  set(key: string, value: V, ttlMs?: number): void {
     if (this.entries.has(key)) this.entries.delete(key);
-    this.entries.set(key, { value, expiresAt: this.now() + this.ttlMs });
+
+    const lifetime = ttlMs === undefined ? this.ttlMs : Math.min(ttlMs, this.ttlMs);
+    this.entries.set(key, { value, expiresAt: this.now() + lifetime });
 
     while (this.entries.size > this.max) {
       const oldest = this.entries.keys().next();
