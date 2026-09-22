@@ -8,8 +8,8 @@ import { createAuthClient } from '../src/index';
  *
  * ⚠️ THE ASSERTION IS THE FETCH COUNT, not the verdict. A cache that simply dropped the
  * entry would also refuse, and so would one that never cached at all. What is asserted is
- * that the second call actually REACHED THE AUTH SERVICE once the token's expiry passed —
- * that the cached verdict stopped standing in for it. The verdict is the consequence.
+ * that the call actually REACHED THE AUTH SERVICE once the token's expiry passed — that
+ * the cached verdict stopped standing in for it. The verdict is the consequence.
  *
  * The clock is driven through `internals.now`, the seam the conformance suite already
  * uses, because a test that sleeps through a 60-second window is a test nobody runs.
@@ -65,6 +65,28 @@ describe('the positive cache never outlives the token it caches', () => {
 
     expect(spy).toHaveBeenCalledTimes(2);
     expect(afterExpiry.kind).toBe('refused');
+  });
+
+  it('does not extend a token with less life left than the skew floor', async () => {
+    let nowMs = 1_700_000_000_000;
+    let reply = verified;
+    const spy = stubAuthService(() => reply());
+    const client = clientOn(() => nowMs);
+
+    // Two seconds of genuine life — less than the 5s skew floor. Applying that floor to
+    // every token would cache this for 5s and serve it `verified` for 3s past its own
+    // `exp`: the defect this file exists to close, just smaller. Every token passes
+    // through this window on its way out, so it is the happy path rather than an edge.
+    const token = tokenExpiringAt(Math.floor(nowMs / 1000) + 2);
+
+    expect((await client.verify(token)).kind).toBe('verified');
+    expect(spy).toHaveBeenCalledTimes(1);
+
+    nowMs += 3_000;
+    reply = refused;
+
+    expect((await client.verify(token)).kind).toBe('refused');
+    expect(spy).toHaveBeenCalledTimes(2);
   });
 
   it('throttles a token our clock thinks has expired but the auth service accepts', async () => {
