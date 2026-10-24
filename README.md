@@ -181,6 +181,8 @@ Two is not enough, and that is not a theoretical point — it is the defect this
 
 `/token/validate` does more than check a signature: it requires a **live row in `purpus_auth.session_info` for that exact token**, and signing out deletes that row. **So revocation at the auth service is immediate.**
 
+**Cache keys are `SHA-256(token)`, never the bearer token itself**, in the positive cache, the negative cache and the single-flight map alike, so a heap dump or a debugger holds no usable credential (`cacheKey`, `test/cache-key.test.ts`). An entry also never outlives the token's own `exp` (`test/token-expiry.test.ts`).
+
 The only place a signed-out credential survives is **this package's positive cache, for at most 60 seconds**. That 60 seconds *is* the revocation reach. It is a security parameter, not a tuning knob, and it is **deliberately not configurable**.
 
 **`invalidate(token)` and `clear()` are exported so the conformance suite can drive the cache.** Nothing in the estate currently calls `invalidate` from a sign-out, and **it is important that you know that rather than assuming the method's existence means the window is closed.** Closing it properly needs a revocation channel — a shared cache or a broadcast from the auth service to every running service — which **does not exist in this estate and is not this package's job**.

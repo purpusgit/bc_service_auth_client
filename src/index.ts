@@ -41,6 +41,7 @@ export type ExpressLikeHandler = (
 ) => void | Promise<void>;
 
 import { introspect, type Introspection } from './introspect';
+import { createHash } from 'crypto';
 import { TtlCache } from './cache';
 
 export type { Introspection };
@@ -89,6 +90,11 @@ const MAX_ENTRIES = 5_000;
  * Anything that is not a JWT with a numeric `exp` returns undefined, and the entry takes
  * the full ceiling exactly as it did before.
  */
+/** The cache key for a bearer token: its SHA-256, hex. Exported for the conformance test only. */
+export function cacheKey(token: string): string {
+  return createHash('sha256').update(token, 'utf8').digest('hex');
+}
+
 function tokenExpiryMs(token: string): number | undefined {
   const payload = token.split('.')[1];
   if (!payload) return undefined;
@@ -256,18 +262,23 @@ export function createAuthClient(
   const inFlight = new Map<string, Promise<Resolution>>();
 
   async function resolve(token: string): Promise<Resolution> {
-    const warm = positive.get(token);
+    // Every map is keyed on the token's SHA-256, never the bearer token itself (AUTH-01 order 5,
+    // specs#312 6387624126): a heap dump, a debugger or a future "log the cache" line then holds
+    // no usable credential. The token is still sent to the auth service and the resolver; only
+    // the keys change.
+    const key = cacheKey(token);
+    const warm = positive.get(key);
     if (warm) return { kind: 'verified', principal: warm };
-    if (negative.get(token)) return { kind: 'refused' };
+    if (negative.get(key)) return { kind: 'refused' };
 
-    const existing = inFlight.get(token);
+    const existing = inFlight.get(key);
     if (existing) return existing;
 
     const pending = (async (): Promise<Resolution> => {
       const outcome = await introspect(baseUrl, token, timeoutMs);
 
       if (outcome.kind === 'refused') {
-        negative.set(token, true);
+        negative.set(key, true);
         return { kind: 'refused' };
       }
 
@@ -296,7 +307,7 @@ export function createAuthClient(
         if (local === null || local === undefined) {
           // Verified principal, no local row. REFUSE. Never proceed as a placeholder
           // identity and never defer the decision to a downstream check.
-          negative.set(token, true);
+          negative.set(key, true);
           return { kind: 'refused' };
         }
         principal = { userId: outcome.userId, local };
@@ -325,15 +336,15 @@ export function createAuthClient(
       const remaining = expiresAtMs === undefined ? undefined : expiresAtMs - now();
 
       positive.set(
-        token,
+        key,
         principal,
         remaining === undefined ? undefined : remaining > 0 ? remaining : NEGATIVE_TTL_MS,
       );
 
       return { kind: 'verified', principal };
-    })().finally(() => inFlight.delete(token));
+    })().finally(() => inFlight.delete(key));
 
-    inFlight.set(token, pending);
+    inFlight.set(key, pending);
     return pending;
   }
 
@@ -422,8 +433,9 @@ export function createAuthClient(
     isMemberOfOrganisation: async (principal: Principal, organisationId: string) =>
       Boolean(await isMemberOf(principal, organisationId)),
     invalidate(token: string) {
-      positive.delete(token);
-      negative.delete(token);
+      const key = cacheKey(token);
+      positive.delete(key);
+      negative.delete(key);
     },
     clear() {
       positive.clear();
